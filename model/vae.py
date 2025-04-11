@@ -284,9 +284,10 @@ def test_epoch(model, dataloader, curr_step, writer=None):
 
 
 class KanaKanjiDataset(Dataset):
-    def __init__(self, root_dir, transform=None, target_transform=None):
+    def __init__(self, root_dir, train, transform=None, target_transform=None):
         self.img_dir = os.path.join(root_dir, 'kanakanji_png')
-        self.img_labels = pd.read_csv(os.path.join(root_dir, 'kanakanji_info.csv'))
+        img_labels = pd.read_csv(os.path.join(root_dir, 'kanakanji_info.csv'))
+        self.img_labels = img_labels[img_labels.train == train]
         self.transform = transform
         self.target_transform = target_transform
 
@@ -345,17 +346,5 @@ def main():
     
 
 if __name__ == '__main__':
-    # main()
-
-    
-    data_root_dir = 'kanakanji_assets'
-    # load and transform data
-    #   data transformation
-    # transform = v2.Compose([
-    #     v2.ToImage(),
-    #     v2.ToDtype(torch.float32, scale=True),
-    #     v2.Lambda(lambda x: x - 0.5)
-    # ])
-    train_data = KanaKanjiDataset(root_dir=data_root_dir)#, train=True)#, transform=transform)
-    print(len(train_data))
+    main()
 

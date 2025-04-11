@@ -41,6 +41,12 @@ def main():
     # for index, row in df[df.strokeCount == 1].iterrows():
     #     print(row.kanakanji, row.unicode)
 
+    # create training and test assignments
+    df['train'] = False
+    dftrain = df.sample(frac=0.8)
+    dftrain.train = True
+    df.update(dftrain)
+
     # # send info to csv so I don't have to keep remaking it
     df.to_csv('kanakanji_info.csv', index=False)
 
