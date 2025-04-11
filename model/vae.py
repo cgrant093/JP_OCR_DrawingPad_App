@@ -1,11 +1,16 @@
 
-from config import DEVICE, HYPERPARAMETERS as HP
+from config import DEVICE, VAE_HYPERPARAMETERS as HP
 from dataclasses import dataclass
 from datetime import datetime
+import os 
+import pandas as pd
+# from PIL import Image
 import torch 
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 import torch.utils.tensorboard as SummaryWriter
+from torchvision.io import read_image
 from torchvision.transforms import v2
 from tqdm.auto import tqdm
 
@@ -37,42 +42,47 @@ class VAE(nn.Module):
 
     Args:
         model_dims(dict): holds the dimensionality of the different model layers
-            'input' (int) for the dimensionality of the input data
-            'hidden' (int) for the dimensionality of the hidden layer
+            'img_len' (int) for the pixel length of the images
+            'out_ch' (int) for the number of the channels produced by the first conv2d layer
             'latent' (int) for the dimensionality of the latent space
     '''
 
     def __init__(self, **model_dims):
         super().__init__()
 
-        input_dim = model_dims['input']
-        hidden_dim = model_dims['hidden']
+        img_len = model_dims['img_len']
+        out_ch_dim = model_dims['out_ch']
         latent_dim = model_dims['latent']
+        h_fc = img_len**2
+        img_4Conv = img_len//(2**4)
+        pre_flatten_size = torch.Size([8*out_ch_dim, img_4Conv, img_4Conv])
 
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
+            nn.Conv2d(1, out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.Conv2d(out_ch_dim, 2*out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim // 2, hidden_dim // 4),
+            nn.Conv2d(2*out_ch_dim, 4*out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim // 4, hidden_dim // 8),
+            nn.Conv2d(4*out_ch_dim, 8*out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim // 8, 2*latent_dim) # 2 for mean and variance
+            nn.Flatten(),
+            nn.Linear(h_fc, 2*latent_dim) # 2 for mean and variance
         )
+        # turns out: img_len**2 = 8*out_ch_dim*(img_4Conv)**2
 
         self.softplus = nn.Softplus()
 
         self.decoder = nn.Sequential(
-            nn.Linear(latent_dim, hidden_dim // 8), 
+            nn.Linear(latent_dim, h_fc),
+            nn.Unflatten(-1, pre_flatten_size),
+            nn.ConvTranspose2d(8*out_ch_dim, 4*out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim // 8, hidden_dim // 4),
+            nn.ConvTranspose2d(4*out_ch_dim, 2*out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim // 4, hidden_dim // 2),
+            nn.ConvTranspose2d(2*out_ch_dim, out_ch_dim, 4, stride=2, padding=1),
             nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim // 2, hidden_dim),
-            nn.SiLU(), # Swish activation function
-            nn.Linear(hidden_dim, input_dim),
+            nn.ConvTranspose2d(out_ch_dim, 1, 4, stride=2, padding=1),
             nn.Sigmoid()
         )
 
@@ -85,20 +95,20 @@ class VAE(nn.Module):
             eps (float): small value to avoid numerical instability
 
         Returns:
-            torch.distributions.MultvariateNormal: normal distribution of the encoded data
+            torch.distributions.MultivariateNormal: normal distribution of the encoded data
         '''
         x = self.encoder(x)
         mu, logvar = torch.chunk(x, 2, dim=-1)
         scale = self.softplus(logvar) + eps 
         scale_tril = torch.diag_embed(scale)
-        return torch.distributions.MultvariateNormal(mu, scale_tril=scale_tril)
+        return torch.distributions.MultivariateNormal(mu, scale_tril=scale_tril)
 
     def reparameterize(self, dist):
         '''
         Reparameterizes the encoded data to sample from the latent space
 
         Args:
-            dist (torch.distributions.MultvariateNormal): normal distribution of the encoded data
+            dist (torch.distributions.MultivariateNormal): normal distribution of the encoded data
 
         Returns:
             torch.Tensor: data sampled from the latent space
@@ -144,7 +154,7 @@ class VAE(nn.Module):
         
         # compute loss 
         loss_recon = F.binary_cross_entropy(x_recon, x+0.5, reduction='none').sum(-1).mean()
-        std_norm = torch.distributions.MultvariateNormal(
+        std_norm = torch.distributions.MultivariateNormal(
             torch.zeros_like(z, device=z.device),
             scale_tril=torch.eye(z.shape[-1], device=z.device).unsqueeze(0).expand(z.shape[0], -1, -1)
         )
@@ -158,7 +168,7 @@ class VAE(nn.Module):
             loss_recon=loss_recon,
             loss_kl=loss_kl
         )
-    
+
 
 def train_epoch(model, dataloader, optimizer, prev_updates, writer=None):
     '''
@@ -202,7 +212,7 @@ def train_epoch(model, dataloader, optimizer, prev_updates, writer=None):
             loss = train_loss.item()
             loss_recon = output.loss_recon.item()
             loss_kl = output.loss_kl.item()
-            n_smpl = n_upd*HP['BATCH_SIZE']
+            n_smpl = n_upd*HP.batch_size
             # print batch info
             print(f'Step {n_upd:,} (N samples: {n_smpl:,}), Loss: {loss:.4f} (Recon: {loss_recon:.4f}, KL: {loss_kl:.4f}) Grad: {total_norm:.4f}')
             # log batch info with writer
@@ -237,7 +247,7 @@ def test_epoch(model, dataloader, curr_step, writer=None):
     test_loss = 0
     test_loss_recon = 0
     test_loss_kl = 0
-    img_size = torch.Size([-1, 1, HP['IMG_PX_LEN'], HP['IMG_PX_LEN']])
+    img_size = torch.Size([-1, 1, HP.img_px_len, HP.img_px_len])
 
     # evaluate without running gradient
     with torch.no_grad():
@@ -268,39 +278,62 @@ def test_epoch(model, dataloader, curr_step, writer=None):
         writer.add_images('Test/Reconstructions', output.x_recon.view(img_size), global_step=curr_step)
         writer.add_images('Test/Originals', data.view(img_size), global_step=curr_step)
         # log random samples from latent space
-        z = torch.randn(16, HP['LATENT_DIM']).to(DEVICE)
+        z = torch.randn(16, HP.latent_dim).to(DEVICE)
         samples = model.decode(z)
         writer.add_images('Test/Samples', samples.view(img_size), global_step=curr_step)
 
 
+class KanaKanjiDataset(Dataset):
+    def __init__(self, root_dir, transform=None, target_transform=None):
+        self.img_dir = os.path.join(root_dir, 'kanakanji_png')
+        self.img_labels = pd.read_csv(os.path.join(root_dir, 'kanakanji_info.csv'))
+        self.transform = transform
+        self.target_transform = target_transform
+
+    def __len__(self):
+        return len(self.img_labels)
+
+    def __getitem__(self, idx):
+        img_name = self.img_labels['pngFile'].iloc[idx]
+        img_path = os.path.join(self.img_dir, img_name)
+        image = read_image(img_path)
+        label = self.img_labels['kanakanji'].iloc[idx]
+        if self.transform:
+            image = self.transform(image)
+        if self.target_transform:
+            label = self.target_transform(label)
+        return image, label
+    
+
 def main():
+    data_root_dir = 'kanakanji_assets'
     # load and transform data
     #   data transformation
     transform = v2.Compose([
         v2.ToImage(),
         v2.ToDtype(torch.float32, scale=True),
-        v2.Lambda(lambda x: x.view(-1) - 0.5)
+        v2.Lambda(lambda x: x - 0.5)
     ])
     #   training data and dataloader
-    # train_data = 
-    train_loader = torch.utils.data.DataLoader(train_data, batch_size=HP['BATCH_SIZE'], shuffle=True)
+    train_data = KanaKanjiDataset(root_dir=data_root_dir, train=True, transform=transform)
+    train_loader = torch.utils.data.DataLoader(train_data, batch_size=HP.batch_size, shuffle=True)
     #   test data and dataloader
-    # test_data =
-    test_loader = torch.utils.data.DataLoader(test_data, batch_size=HP['BATCH_SIZE'], shuffle=False)
+    test_data = KanaKanjiDataset(root_dir=data_root_dir, train=False, transform=transform)
+    test_loader = torch.utils.data.DataLoader(test_data, batch_size=HP.batch_size, shuffle=False)
     
     # define model and optimizer
-    nn_dims = {'input':HP['IMG_PX_LEN']**2, 'hidden':HP['HIDDEN_DIM'], 'latent':HP['LATENT_DIM']}
+    nn_dims = {'img_len':HP.img_px_len, 'out_ch':HP.out_ch_dim, 'latent':HP.latent_dim}
     model = VAE(nn_dims).to(DEVICE)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=HP['LR'], weight_decay=HP['WT_DECAY'])
+    optimizer = torch.optim.AdamW(model.parameters(), lr=HP.lr, weight_decay=HP.wt_decay)
 
     # define summary writer
     t0 = datetime.now().strftime("%Y%m%d-%H%M%S")
-    summary_location = f'runs/mnist/vae_{t0}'
+    summary_location = f'{data_root_dir}/runs/vae_{t0}'
     writer = SummaryWriter(summary_location)
 
     # training loop over each epoch 
     prev_updates = 0
-    num_epochs = HP['NUM_EPOCHS']
+    num_epochs = HP.num_epochs
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}')
         prev_updates = train_epoch(model, train_loader, optimizer, prev_updates, writer)
@@ -312,295 +345,17 @@ def main():
     
 
 if __name__ == '__main__':
-    main()
-
-
-# import config as cnfg
-# import io
-# import matplotlib
-# import matplotlib.pyplot as plt
-# from mpl_toolkits.axes_grid1 import ImageGrid
-# import numpy as np
-# import os
-# import pandas as pd
-# from pathlib import Path
-# from PIL import Image
-# import torch 
-# from torch.distributions.normal import Normal
-# import torch.nn as nn
-# import torch.nn.functional as F
-# import torch.optim as optim
-# from torch.utils.data import Dataset, DataLoader
-# from torchvision import datasets, transforms
-# from torchvision.datasets.vision import VisionDataset
-# from torchvision.utils import save_image, make_grid
-# from xml.etree import ElementTree as ET
-
-# # change the backend based on the non-gui backend available
-# matplotlib.use("agg")
-
-
-# class KanaKanjiDataset(Dataset):
-#     '''KanaKanji dataset'''
-
-#     def __init__(self, root, train, transform) -> None:
-#         """
-#         Arguments:
-#             root_dir (string): Directory with all the images.
-#             transform (callable, optional): Optional transform to be applied
-#                 on a sample.
-#         """
-#         self.root_dir = root
-#         self.png_dir = os.path.join(self.root_dir, 'kanakanji_png')
-#         kanakanji_csv_path = os.path.join(self.root_dir, 'kanakanji_info.csv')
-#         self.kanakanji_info = pd.read_csv(kanakanji_csv_path)
-
-#         self.transform = transform
-
-#     def __len__(self):
-#         return len(self.kanakanji_info)
-
-#     def __getitem__(self, idx):
-#         if torch.is_tensor(idx):
-#             idx = idx.tolist()
-
-#         img_name = os.path.join(self.png_dir, self.kanakanji_info['pngFile'].iloc[idx])
-#         image = io.imread(img_name)
-#         landmarks = self.landmarks_frame.iloc[idx, 1:]
-#         landmarks = np.array([landmarks], dtype=float).reshape(-1, 2)
-#         sample = {'image': image, 'landmarks': landmarks}
-
-#         if self.transform:
-#             sample = self.transform(sample)
-
-#         return sample
-    
-
-# def get_train_loader():
-
-#     return DataLoader(trainset, batch_size=cnfg.BATCH_SIZE, shuffle=True)
-
-# def get_test_loader():
-
-#     return DataLoader(testset, batch_size=cnfg.BATCH_SIZE, shuffle=True)
-
-
-# class VAE(nn.Module):
-
-#     def __init__(self, embedding_dim, shape_before_flattening):
-#         super().__init__()
-
-#         # encoder
-#         #   define the convolutional layers (and activation layers) 
-#         #       for downsampling and feature extraction
-#         #   as well as the flatten layer
-#         self.encoder = nn.Sequential(
-#             nn.Conv2d(1, 32, 3, stride=2, padding=1),
-#             nn.ReLU(),
-#             nn.Conv2d(32, 64, 3, stride=2, padding=1),
-#             nn.ReLU(),
-#             nn.Conv2d(64, 128, 3, stride=2, padding=1),
-#             nn.ReLU(),
-#             nn.Flatten()
-#         )
-#         #   define fully connected layers to transform the tensor into the desired embedding dimensions
-#         H_fc = np.prod(shape_before_flattening)
-#         self.fc_mean = nn.Linear(H_fc, embedding_dim)
-#         self.fc_log_var = nn.Linear(H_fc, embedding_dim)
-        
-#         # decoder
-#         #   define a fully connected layer to transform the latent vector back to the shape before flattening
-#         self.fc = nn.Linear(embedding_dim, H_fc)
-#         #   define a reshape function to reshape the tensor back to its original shape
-#         self.reshape = lambda x: x.view(-1, *shape_before_flattening)
-#         #   define the transposed convolutional layers (and activation layers)
-#         #       for the decoder to upsample and generate the reconstructed image
-#         self.decoder = nn.Sequential(
-#             nn.ConvTranspose2d(128, 64, 3, stride=2, padding=1, output_padding=1),
-#             nn.ReLU(),
-#             nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),
-#             nn.ReLU(),
-#             nn.ConvTranspose2d(32, 1, 3, stride=2, padding=1, output_padding=1),
-#             nn.Sigmoid()
-#         )
-
-        
-#     def sample(self, mean, log_var):
-#         # get the shape of the tensor for the mean and log variance
-#         batch, dim = mean.shape
-#         # generate a normal random tensor (epsilon) with the same shape as z_mean
-#         # this tensor will be used for reparameterization trick
-#         epsilon = Normal(0, 1).sample((batch, dim)).to(mean.device)
-#         # apply the reparameterization trick to generate the samples in the latent space
-#         return mean + epsilon*torch.exp(log_var/2)
-    
-#     def encode(self, x):
-#         # apply convolutional layers with relu activation function and flatten tensor
-#         x = self.encoder(x)
-#         # get the mean and log variance of the latent space distribution
-#         z_mean = self.fc_mean(x)
-#         z_log_var = self.fc_log_var(x)
-#         # sample a latent vector using the reparameterization trick
-#         z = self.sample(z_mean, z_log_var)
-#         return z_mean, z_log_var, z
-
-#     def decode(self, x):
-#         # pass the latent vector through the fully connected layer
-#         x = self.fc(x)
-#         # reshape the tensor
-#         x = self.reshape(x)
-#         # apply transposed convolutional layers with given activation functions:
-#         #   either relu or sigmoid depending on the layer
-#         return self.decoder(x)
-    
-#     def forward(self, x):
-#         # pass the input through the encoder to get the latent vector
-#         z_mean, z_log_var, z = self.encode(x)
-#         # pass the latent vector through the decoder to get the reconstructed image
-#         x_recon = self.decode(z)
-#         # return the mean, log variance and the reconstructed image
-#         return z_mean, z_log_var, x_recon
-
-
-# def reconstruction_loss(reconstruction, x):
-#     bce_loss = nn.BCELoss()
-#     return bce_loss(reconstruction, x)
-
-# def gaussian_kl_loss(mu, log_var):
-#     # see Appendix B from VAE paper:
-#     # Kingma and Welling. Auto-Encoding Variational Bayes. ICLR, 2014
-#     # https://arxiv.org/abs/1312.6114
-#     KLD = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp(), dim=1)
-#     return KLD.mean()
-
-# def vae_loss(y_pred, y_true):
-#     mu, logvar, recon_x = y_pred
-#     recon_loss = reconstruction_loss(recon_x, y_true)
-#     kld_loss = gaussian_kl_loss(mu, logvar)
-#     return 500 * recon_loss + kld_loss
-
-# def eval_vae_loss(vae, data):
-#     data = data.to(cnfg.DEVICE)
-#     # forward pass through the VAE
-#     pred = vae(data)
-#     # compute and return the VAE loss
-#     return vae_loss(pred, data)
-
-
-# def train(vae, train_loader, optimizer):
-#     # set the vae model to train mode
-#     # and move it to CPU/GPU
-#     vae.train()
-#     vae.to(cnfg.DEVICE)
-#     running_loss = 0.0
-#     # loop over the batches of the training dataset
-#     for batch_idx, (data, _) in enumerate(train_loader):
-#         optimizer.zero_grad()
-#         # compute vae loss
-#         loss = eval_vae_loss(vae, data)
-#         # backward pass and optimizer step
-#         loss.backward()
-#         optimizer.step()
-#         running_loss += loss.item()
-#     # compute and return average loss for the epoch
-#     return running_loss / len(train_loader)
-
-# def validate(vae, test_loader):
-#     # set the vae model to eval mode
-#     # and move it to CPU/GPU
-#     vae.eval()
-#     vae.to(cnfg.DEVICE)
-#     running_loss = 0.0
-#     # loop over the batches of the training dataset
-#     for data, _ in test_loader:
-#         # compute vae loss
-#         loss = eval_vae_loss(vae, data)
-#         running_loss += loss.item()
-#     return running_loss
-
-# def train_vae(train_loader, test_loader):
-#     # instantiate the vae model
-#     vae = VAE(cnfg.EMBEDDING_DIM, cnfg.SHAPE_BEFORE_FLATTENING).to(cnfg.DEVICE)
-#     # instantiate optimizer and scheduler
-#     optimizer = optim.Adam(list(vae.parameters()), lr=cnfg.LR)
-#     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-#         optimizer, mode="min", factor=0.1, patience=cnfg.PATIENCE, verbose=True
-#     )
-
-#     # initialize the best validation loss as infinity
-#     best_val_loss = float("inf")
-#     # start training by looping over the number of epochs
-#     for epoch in range(cnfg.EPOCHS):
-#         # compute average loss for the epoch
-#         train_loss = train(vae, train_loader, optimizer)
-#         # compute validation loss for the epoch
-#         val_loss = validate(vae, test_loader)
-#         # save best vae model weights based on validation loss
-#         if val_loss < best_val_loss:
-#             best_val_loss = val_loss
-#             torch.save(
-#                 {"vae": vae.state_dict()},
-#                 cnfg.MODEL_WEIGHTS_PATH,
-#             )
-#         # print training and validation loss at every 20 epochs
-#         if epoch % 20 == 0 or (epoch+1) == cnfg.EPOCHS:
-#             print(
-#                 f"Epoch {epoch} | Train Loss: {train_loss:.4f} | Val Loss: {val_loss:.4f}"
-#             )
-#         # adjust learning rate based on the validation loss
-#         scheduler.step(val_loss)
-
-
-# def main():
-
-#     # define the transformation to be applied to the data
-#     transform = transforms.Compose(
-#         [transforms.Pad(padding=2), transforms.ToTensor()]
-#     )
-#     # print(datasets.FashionMNIST("data").__dir__())
-#     # quit()
-#     # load the FashionMNIST training data and create a dataloader
-
-#     trainset = datasets.FashionMNIST(
-#         "data", train=True, download=True, transform=transform
-#     )
-#     print(len(trainset))
-#     print(trainset[0][0].size())
-
-#     testset = datasets.FashionMNIST(
-#         "data", train=False, download=True, transform=transform
-#     )
-#     print(len(testset))
-#     print(testset[0][0].size())
-
-#     trainset = KanaKanjiDataset(
-#         'kanakanji_assets', train=True, transform=transform
-#     )
-#     # print(trainset[0])
-#     # print(trainset[1])
-#     # print(trainset[2])
-#     # print(trainset[3])
-    
-#     # # load the FashionMNIST training data and create a dataloader
-#     # trainset = datasets.FashionMNIST(
-#     #     "data", train=True, download=True, transform=transform
-#     # )
-#     # print(len(trainset))
-#     # print(trainset[0])
-
-
-#     # train_vae()
+    # main()
 
     
+    data_root_dir = 'kanakanji_assets'
+    # load and transform data
+    #   data transformation
+    # transform = v2.Compose([
+    #     v2.ToImage(),
+    #     v2.ToDtype(torch.float32, scale=True),
+    #     v2.Lambda(lambda x: x - 0.5)
+    # ])
+    train_data = KanaKanjiDataset(root_dir=data_root_dir)#, train=True)#, transform=transform)
+    print(len(train_data))
 
-#     # kanakanji_assets_folder = 'kanakanji_assets'
-#     # kanakanji_info_csv = os.path.join(kanakanji_assets_folder, 'kanakanji_info.csv')
-#     # png_folder = os.path.join(kanakanji_assets_folder, 'kanakanji_png')
-#     # df = pd.read_csv(kanakanji_info_csv)
-#     # png_file = os.path.join(png_folder, '09f9d.png')
-
-
-#     return 0
-
-# if __name__ == '__main__':
-#     main()

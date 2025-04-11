@@ -1,20 +1,62 @@
 
-import os
+from dataclasses import dataclass
+# import os
 import torch 
 
 # set device to 'cuda' if available, otherwise cpu' 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu') 
 
+@dataclass 
+class ModelHyperparameters:
+    '''
+    Dataclass for a model's hyperparameters
+
+    Attributes:
+        lr (float): learning rate for model 
+        wt_decay (float): weigth decay for model
+        num_epochs (int): number of epochs model will train through
+        batch_size (int): batch size for the training/testing data
+    '''
+    lr: float
+    wt_decay: float
+    num_epochs: int
+    batch_size: int
+
+@dataclass
+class VAEHyperparameters(ModelHyperparameters):
+    '''
+    Dataclass for VAE Hyperparameters
+
+    Attributes:
+        img_px_len (int): pixel length (height and width) of the images
+        out_ch_dim (int): number of the channels produced by the first conv2d layer
+        latent_dim (int): dimensionality of the latent space
+    '''
+    img_px_len: int
+    out_ch_dim: int
+    latent_dim: int
+
 # define model hyperparameters
-HYPERPARAMETERS = {
-    'LR' : 1e-3,
-    'WT_DECAY' : 1e-2,
-    'NUM_EPOCHS' : 50,
-    'IMG_PX_LEN' : 28,
-    'LATENT_DIM' : 2,
-    'HIDDEN_DIM' : 512,
-    'BATCH_SIZE' : 128
-}
+VAE_HYPERPARAMETERS = VAEHyperparameters(
+    lr=1e-3,
+    wt_decay=1e-2,
+    num_epochs=50,
+    batch_size=128,
+    img_px_len=64,
+    out_ch_dim=32,
+    latent_dim=2
+)
+
+# 
+# HYPERPARAMETERS = {
+#     'LR' : ,
+#     'WT_DECAY' : 1e-2,
+#     'NUM_EPOCHS' : 50,
+#     'IMG_PX_LEN' : 64,
+#     'OUT_CH_DIM' : 32,
+#     'LATENT_DIM' : 2,
+#     'BATCH_SIZE' : 128
+# }
 
 # PATIENCE = 2
 # IMAGE_SIZE = 32
