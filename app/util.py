@@ -1,271 +1,119 @@
-# '''
 
-import math
-# import pandas as pd
-
-import pyglet
-from pyglet.image import AbstractImage
-from pyglet.gl import GL_ONE_MINUS_SRC_ALPHA, GL_SRC_ALPHA
-from pyglet.graphics import Batch, Group
-from pyglet.graphics.shader import ShaderProgram
-from pyglet.gui import PushButton, TextEntry
-from pyglet.shapes import Rectangle
-from pyglet_new_shapes import Stroke
-
+from math import atan2, pi
 import os
-import re
-import time
+from PySide6.QtGui import QColor
+import sys
 
 
-class MyTablet:
-    def __init__(self, app):
-        self.max_int16 = 65534
-        self._set_tablet_()
-        self.device.open()
-        self._set_controls_()
-        # self.set_window_attrs(app.x_factor, app.sx, app.sy)
-        self.x_factor = app.x_factor
-        self.sx = app.sx
-        self.sy = app.sy
+# to make sure pyinstaller works with the extra resources
+def resource_path(relative_path):
+    """Get the absolute path to resource, works for dev and for PyInstaller."""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS
+    except AttributeError:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
 
-    def _set_tablet_(self):
-        tablets = [ 
-            tablet
-            for tablet in pyglet.input.get_devices()
-            if 'tablet' in tablet.name.lower()
-            if tablet.get_controls()
+kanakanji_app_info_path = resource_path('kanakanji_app_info.csv')
+green_tea_icon_path = resource_path('green_tea_icon.png')
+
+# app custom colors
+matcha = QColor('#E4F8BA')
+matcha_dark = QColor('#52681D')
+sakura = QColor('#FFBAC7')
+sakura_dark = QColor('#DA5286')
+bamboo = QColor('#DA6304')
+white = QColor('white')
+
+# app object sizes
+kanji_font = 50
+button_font = 36
+label_font = 21
+draw_area_side_length = 500
+radio_width = 140
+radio_height = 140
+big_button_size = 140
+small_button_size = kanji_font + 20
+input_spacer_height = draw_area_side_length - radio_height - big_button_size - 10
+scroll_area_width = 2*1.2*big_button_size
+scroll_area_height = draw_area_side_length
+window_wh_ratio = 1200/720
+window_height = draw_area_side_length + small_button_size + 2*label_font + 100 #720
+window_width = draw_area_side_length + radio_width + scroll_area_width + 50 #1200
+top_spacer_width = 0
+
+# unit circle divisions info
+class UnitCircleDivisionInfo:
+    def __init__(self, directions_list, pure_division_width):
+        self.directions = directions_list + [directions_list[0]]
+        self.num_directions = len(self.directions)
+        self.divisions_width = 2*pi/(self.num_directions-1)
+        self.directions_mid_angles = [i*self.divisions_width-pi for i in range(self.num_directions)]
+        self.pure_division_width = pure_division_width
+        self.sub_division_boundary_angles = list({
+            0,
+            self.pure_division_width / 2,
+            self.divisions_width / 2,
+            self.divisions_width - self.pure_division_width / 2,
+            self.divisions_width
+        })
+        self.sub_division_boundary_angles.sort()
+        self.all_division_boundary_angles = [
+            [   self.directions_mid_angles[division_index] + phi
+                for phi in self.sub_division_boundary_angles  ]
+            for division_index in range(self.num_directions-1)
         ]
-        self.device = tablets[0]
 
-    def _set_controls_(self):
-        controls = {
-            control.raw_name : control
-            for control in self.device.get_controls()
-        }
-        # AbsoluteAxis Controls
-        self.P = controls['Tip Pressure']
-        self.X = controls['X Axis']     
-        self.Y = controls['Y Axis']
-        self.THETA = controls['X Tilt']
-        self.PHI = controls['Y Tilt']
-        # Button Controls
-        self.in_range = controls['In Range']
-        self.contact = controls['Tip Switch']
-        self.pen_btn = controls['Barrel Switch']
-        # self.Invert = controls['Invert']      # unknown
-        # self.Eraser = controls['Eraser']      # unknown
+    def find_direction(self, diff):
+        '''
+        directions key:
+            u = y+ (within approx +/- 5 deg)
+            d = y- (within approx +/- 5 deg)
+            r = x+ (within approx +/- 5 deg)
+            l = x- (within approx +/- 5 deg)
+            p ~= Q1 (everything remaining after above removed)
+            q ~= Q2 (everything remaining after above removed)
+            s ~= Q3 (everything remaining after above removed)
+            t ~= Q4 (everything remaining after above removed)
+            o = starts and ends in same place
+        '''
 
-        # controls['X Axis'].set_handler('on_change', print_change)
-            # x location of screen work area. ranges from 0 to 65535. left = 0.
+        possibilities = []
+        is_primary = 1
 
-        # controls['Y Axis'].set_handler('on_change', print_change)
-            # y location of screen work area. ranges from 0 to 65535. top = 0.
-            
-        # controls['Tip Pressure'].set_handler('on_change', print_change)
-        #     # works. ranges from 0 to 65535 (highest number for 16 bit integer)
-            
-        # controls['X Tilt'].set_handler('on_change', print_change)
-        #     # pen's tilt angle relative to the tablet (in x direction). 
-        #     # assuming the same range as above, but cannot reach outer 50%
-            
-        # controls['Y Tilt'].set_handler('on_change', print_change)
-        #     # pen's tilt angle relative to the tablet (in y direction). 
-        #     # assuming the same range as above, but cannot reach outer 50%
-        
-        # controls['In Range'].set_handler('on_press', print_press)
-        # controls['In Range'].set_handler('on_release', print_rel)
-        # controls['In Range'].set_handler('on_change', print_change)
-        #     # only presses does on_change once and on_press once
+        dx = diff.x()
+        dy = -diff.y()
+        theta = atan2(dy, dx) # result is element of (-pi, pi]
 
-        # controls['Tip Switch'].set_handler('on_press', print_press)
-        # controls['Tip Switch'].set_handler('on_release', print_rel)
-        # controls['Tip Switch'].set_handler('on_change', print_change)
-        #     # all three work. on_change goes from True to False when on_press and on_release activate, respectively
+        # if the stroke it starts close to where if finishes
+        close_upper_boundary = 25
+        if abs(dx) < close_upper_boundary and abs(dy) < close_upper_boundary:
+            possibilities.append(('o', is_primary))
+            is_primary = 0
 
-        # controls['Barrel Switch'].set_handler('on_press', print_press)
-        # controls['Barrel Switch'].set_handler('on_release', print_rel)
-        # controls['Barrel Switch'].set_handler('on_change', print_change)
-        #     # all three work with bottom button. on_change goes from True to False when on_press and on_release activate, respectively
-        #     # nothing with top button
+        # this unit circle has n divisions as opposed to 4 quadrants)
+        division_index = sum([
+            i if self.directions_mid_angles[i] < theta <= self.directions_mid_angles[i+1] else 0
+            for i in range(self.num_directions-1)
+        ])
+        # this specific sub-division's boundary angles
+        this_divisions_angles = self.all_division_boundary_angles[division_index]
+        sub_division_index = sum([
+            i if this_divisions_angles[i] < theta <= this_divisions_angles[i+1] else 0
+            for i in range(len(this_divisions_angles)-1)
+        ])
 
-        # controls['Invert'].set_handler('on_press', print_press)
-        # controls['Invert'].set_handler('on_release', print_rel)
-        # controls['Invert'].set_handler('on_change', print_change)
-        #     # doesn't do anything from what I can figure out
+        # there should be only four sub-division choices
+        if sub_division_index == 0:
+            possibilities.append((self.directions[division_index], is_primary))
+        elif sub_division_index == 1:
+            possibilities.append((self.directions[division_index], is_primary))
+            possibilities.append((self.directions[division_index+1], 0))
+        elif sub_division_index == 2:
+            possibilities.append((self.directions[division_index], 0))
+            possibilities.append((self.directions[division_index+1], is_primary))
+        else:
+            possibilities.append((self.directions[division_index+1], is_primary))
 
-        # controls['Eraser'].set_handler('on_press', print_press)
-        # controls['Eraser'].set_handler('on_release', print_rel)
-        # controls['Eraser'].set_handler('on_change', print_change)
-        #     # doesn't do anything from what I can figure out
-
-    def get_pressure(self):
-        return self.P.value/3000
-    
-    def get_x(self):
-        return self.x_factor*self.sx*self.X.value/self.max_int16
-    
-    def get_y(self):
-        return self.sy*(1 - self.Y.value/self.max_int16)
-    
-    def get_coordinates(self):
-        return (self.get_x(), self.get_y())
-    
-    def get_data(self):
-        return {
-            'pressure' : self.get_pressure(),
-            'coordinate' : self.get_coordinates()
-        }
-
-
-class MyApp:
-    def __init__(self, batch):
-        self.app_name = 'Japanese Character Guesser'
-        self._set_app_window_()
-        self.calc_draw_area(batch)
-        self.create_widgets(batch)
-
-    def _find_screen_(self):
-        self.display = pyglet.display.get_display()
-        screens = self.display.get_screens()
-        self.x_factor = len(screens)
-        self.screen = screens[0]
-        if len(screens) > 1:
-            self.screen = screens[1]
-        self.sx = self.screen.width
-        self.sy = self.screen.height
-
-    def _set_app_window_(self):
-        self._find_screen_()
-        self.window = pyglet.window.Window(fullscreen=True, screen=self.screen)
-        self.window.set_fullscreen(False)
-        self.window.maximize()
-        self.window.set_size(width=self.sx, height=self.sy)
-        self.window.set_caption(self.app_name)
-        
-        # icon1 = pyglet.image.load('16x16.png')
-        # icon2 = pyglet.image.load('32x32.png')
-        # window.set_icon(icon1, icon2)
-
-    def run(self):
-        pyglet.app.run()
-
-    def calc_draw_area(self, batch):
-        border_thickness = 7
-        width = 0.85*self.sy
-        back_width = width + 2*border_thickness
-        xb = self.sx - back_width
-        yb = 0
-        x0 = self.sx - border_thickness - width
-        y0 = border_thickness 
-        # self.draw_area.x0
-        self.bigger_rectangle = Rectangle(
-            x=xb, y=yb, 
-            width=back_width, height=back_width,
-            batch=batch, color=(164, 64, 51) 
-        )
-        self.draw_area = Rectangle(
-            x=x0, y=y0, batch=batch,
-            width=width, height=width 
-        )
-
-    def create_widgets(self, batch):
-        blk_btn = pyglet.resource.image('brown_button.png')
-        self.pushbutton = PushButton(
-            x=10, y=0.9*self.sy, pressed=blk_btn, 
-            unpressed=blk_btn, batch=batch
-        )
-
-
-class CalligraphyStroke:
-    def __init__(self):
-        self._pressures = []
-        self._coordinates = []
-        self._min_distance = 15
-
-    @property
-    def pressures(self) -> list:
-        return self._pressures
-
-    @property
-    def coordinates(self) -> list:
-        return self._coordinates
-    
-    def append(self, new_data):
-        if self._coordinates:
-            distance = math.dist(self._coordinates[-1], new_data['coordinate'])
-            if distance < self._min_distance:
-                return 0
-        self._pressures.append(new_data['pressure']) 
-        self._coordinates.append(new_data['coordinate'])
-
-    def create_shape(self, batch, color=None):
-        if not color:
-            return Stroke(*self._coordinates, thicknesses=self._pressures, batch=batch)
-        return Stroke(*self._coordinates, thicknesses=self._pressures, color=color, batch=batch)
-    
-
-class CalligraphyCharacter:
-
-    def __init__(self, draw_area):
-        self.max_stroke_id = 0
-        self.strokes = {}
-        self.shapes = {}
-        self.draw_area = draw_area
-
-    def new_stroke(self):
-        self.max_stroke_id += 1
-        self.strokes.update({self.max_stroke_id: CalligraphyStroke()})
-
-    def _find_stroke_id(self, stroke_id):
-        if not stroke_id:
-            stroke_id = self.max_stroke_id
-        return stroke_id
-    
-    def _stroke_origin_in_draw_area_(self, stroke_id):
-        if self.strokes[stroke_id].coordinates[0] not in self.draw_area:
-            return 0
-        return 1
-    
-    def _num_coords_in_stroke_(self, stroke_id):
-        return len(self.strokes[stroke_id].coordinates)
-
-    def append_stroke_data(self, data, stroke_id=None):
-        stroke_id = self._find_stroke_id(stroke_id)
-        self.strokes[stroke_id].append(data)
-
-    def draw_stroke(self, batch, color=None, stroke_id=None):
-        stroke_id = self._find_stroke_id(stroke_id)
-        if self._num_coords_in_stroke_(stroke_id) < 2:
-            return 0
-        if not self._stroke_origin_in_draw_area_(stroke_id):
-            return 0
-        self.shapes.update({stroke_id: self.strokes[stroke_id].create_shape(batch, color)})
-
-    def finish_stroke(self, stroke_id=None):
-        if not self.strokes:
-            return 0
-        stroke_id = self._find_stroke_id(stroke_id)
-        if stroke_id in self.shapes.keys():
-            return 0
-        if not self._num_coords_in_stroke_(stroke_id):
-            return 0
-        if not self._stroke_origin_in_draw_area_(stroke_id):
-            return 0
-        self.strokes.pop(stroke_id)
-
-    # def delete_stroke(self, stroke_id):
-    #     if not self.strokes:
-    #         return 0
-    #     self.shapes[stroke_id].delete()
-    #     self.shapes.pop(stroke_id)
-    #     self.strokes.pop(stroke_id)
-
-    def clear_all(self):
-        for shape in self.shapes.values():
-            shape.delete()
-        self.max_stroke_id = 0
-        self.strokes = {}
-        self.shapes = {}
-        
-
-
+        return possibilities
